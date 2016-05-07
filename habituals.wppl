@@ -1,0 +1,139 @@
+// time webppl habituals.wppl --require mht --require tjUtils
+// time ~/webppl-paul/webppl habituals.wppl --require mht --require tjUtils
+var bin_data = mht.readCSV(fpath2+"prior2-discrete_bins.csv").data
+var align2afc = {
+	"agree-key":"habitual",
+	"disagree-key": "mm"
+}
+
+var df_tj_wRounded = map(function(x){
+	var i = x["habitual"]
+	// Expt 2 (Figure 2)
+	return _.extend(x, {roundedFreq: nearestPriorBin(x["log_times"], priorBins),
+						alignedResponse : align2afc[x.response]})
+}, df_tj)
+
+var prior_samples = 10000
+var prior_burn = prior_samples/2
+var priorsuff = prior_samples/1000 + "k_burn" + prior_burn/1000 + "k"
+var filepath = "data/priorBDA/"+prior_samples/1000+"k/"
+var priorERPobject = _.object(map(function(i){
+	console.log('loading prior ERP for ' + i)
+	var item = i.split(' ').join('')
+	return [i, _.object(map(function(gen){
+		return [gen, _.object(map(function(dm){
+			var fpath = dm == "existence" ? 
+					"priors2"+gen+"_"+item+"-existenceQ-betaModel-incrMH"+priorsuff+"a.csv" :
+					"waitQ-"+gen+"_"+item+"-incrMH"+priorsuff+"a.csv"
+			var df = readQueryERP(filepath+fpath)
+			return [dm, df]
+		}, ["existence", "wait"]))]
+	},genders))]
+},items))
+
+
+var item_bins = {
+	state_bins: _.range(-1, 9, 0.5),
+	theta_bins: _.range(-0.75,8.75,0.5)
+}
+
+var model = function(){
+
+	var speaker1_optimality = uniform(0,20)
+	var speaker2_optimality = uniform(0,20)
+
+	var phi = 0
+	var prop_male = 0.5
+
+	foreach(items, function(i){
+
+		var pr_exist_m_param = sample(priorERPobject[i]["male"]["existence"]); //exist params
+		var pr_exist_m = beta(
+			shape_alpha(pr_exist_m_param.Gamma, pr_exist_m_param.Delta),
+			shape_beta(pr_exist_m_param.Gamma, pr_exist_m_param.Delta)
+			)
+
+		var pr_exist_f_param = sample(priorERPobject[i]["female"]["existence"]);
+		var pr_exist_f = beta(
+			shape_alpha(pr_exist_f_param.Gamma, pr_exist_f_param.Delta),
+			shape_beta(pr_exist_f_param.Gamma, pr_exist_f_param.Delta)
+			)
+
+		var pp_m = sample(priorERPobject[i]["male"]["wait"]); // freq params.
+		var pp_f = sample(priorERPobject[i]["female"]["wait"]);
+
+		var prior = mix2GaussiansWithDelta(
+			prop_male, 
+			pr_exist_m, 
+			pr_exist_f,
+			pp_m.Mu, 
+			pp_m.Sigma, 
+			pp_f.Mu, 
+			pp_f.Sigma, 
+			item_bins["state_bins"]
+			);
+
+
+		var itemData = subset(df_tj_wRounded, "habitual", i)
+		var freqLevels = _.uniq(_.pluck(itemData, "roundedFreq"))
+
+		// EXPERIMENT 2
+		foreach(freqLevels, function(f){
+
+			var freqData = subset(itemData, "roundedFreq", f)
+			var responseData = _.pluck(freqData, "alignedResponse")
+
+			var grossLevel = freqData[0]["time_period"]
+			
+			var s2 = speaker2(f, prior, speaker1_optimality, speaker2_optimality, item_bins["theta_bins"])
+
+			var scr = reduce(function(response, memo) {
+							    return memo + s2.score([], response)
+								}, 0, responseData)
+
+			// console.log(i + f + scr)
+			// console.log("S2 prob = " + Math.exp(s2.score([], "habitual")))
+			// display(scr)
+			factor(scr)
+
+			// query.add(["L1_predictive", i, f, grossLevel], sample(L1))
+			query.add(["predictive", i, f, grossLevel], Math.exp(s2.score([], "habitual")))
+		})
+
+
+
+	})
+
+	query.add(["parameter", "global", "speaker1_optimality", "NA"], speaker1_optimality)
+	query.add(["parameter", "global", "speaker2_optimality", "NA"], speaker2_optimality)
+
+	return query
+}
+
+var samples = 100
+var burn = samples/2
+// var resultsERP = IncrementalMH(model, samples, {verbose: true, verboseLag: samples/20, burn: burn})
+
+var steps = 5
+var stepSize = 0.01
+var resultsERP = MCMC(model, {
+	samples: samples/2, 
+	verbose: true, 
+	verboseLag: samples/20, 
+	burn: burn,
+	kernel: { HMC: { steps: steps, stepSize: stepSize }}
+})
+
+var outputFile = "results/tj2-RSA-log_ntimes_2so-HMC" + 
+	samples/1000 +"k_burn" + burn/1000 +"k_st"+steps+"stsi"+stepSize+"_prior-mixGenders0.5-"+ 
+	prior_samples/1000 + "k_burn" + prior_burn/1000 + "k_discretize-1-8.5-0.5-a.csv"
+
+// var outputFile = "results/tj2-RSA-log_ntimes_2so-IncrMH" + 
+// 	samples/1000 +"k_burn" + burn/1000 +"k_prior-mixGenders0.5-"+ 
+// 	prior_samples/1000 + "k_burn" + prior_burn/1000 + "k_discretize-1-8.5-0.5-a.csv"
+
+
+var header = "Type,Item,Level,Period,Value"
+tjUtils.erpWriter(resultsERP, outputFile, header)
+console.log("written to " + outputFile)
+
